@@ -6,7 +6,283 @@
    <title>TPI 全维效能管理系统 v22</title>
 
 <script>
-  const BACKEND_URL = 'https://tpi-backend.onrender.com';
+  // ========== Cloud Sync (Local Backend) ==========
+  // 本段用于把「云端同步」登录/上传/下载全部改为调用本地后端（http://localhost:3000）
+  // 保留原有输入框 ID：github-username / github-token
+
+  let isLoggedIn = false;
+
+ const API_BASE_URL = 'https://tpi-backend-api.onrender.com';
+
+  function _getAuthToken() {
+    return localStorage.getItem('authToken') || '';
+  }
+
+  function __setAuthToken(token) {
+    if (token) localStorage.setItem('authToken', token);
+  }
+
+  function __clearAuthToken() {
+    localStorage.removeItem('authToken');
+  }
+
+  // 兼容不同版本 UI：同时尝试更新多组 ID（不会影响其它模块）
+  function __updateLoginUI(isLoggedIn, username) {
+    const loginSection =
+      document.getElementById('login-section') ||
+      document.getElementById('login-form') ||
+      document.getElementById('cloud-login');
+
+    const loggedInUser =
+      document.getElementById('logged-in-user') ||
+      document.getElementById('logged-username');
+
+    const logoutBtn =
+      document.getElementById('logout-btn') ||
+      document.getElementById('cloud-logout-btn');
+
+    const loggedInPanel =
+      document.getElementById('logged-in-panel') ||
+      document.getElementById('cloud-logged-in');
+
+    if (loggedInUser) loggedInUser.textContent = username || '';
+
+    if (isLoggedIn) {
+      if (loginSection) loginSection.style.display = 'none';
+      if (loggedInPanel) loggedInPanel.style.display = 'block';
+      if (logoutBtn) logoutBtn.style.display = 'inline-block';
+    } else {
+      if (loginSection) loginSection.style.display = 'block';
+      if (loggedInPanel) loggedInPanel.style.display = 'none';
+      if (logoutBtn) logoutBtn.style.display = 'none';
+    }
+  }
+
+  // 登录函数（全局）
+  async function cloudLogin() {
+    const username = document.getElementById('username')?.value?.trim();
+    const password = document.getElementById('password')?.value?.trim();
+
+    if (!username || !password) {
+      alert('请输入用户名和密码');
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => '');
+        throw new Error(errorText || '登录失败');
+      }
+
+      const data = await response.json();
+      if (!data || !data.token) throw new Error('登录返回缺少 token');
+
+      __setAuthToken(data.token);
+      localStorage.setItem('cloud_username', username);
+      
+      // ✅ 关键：设置登录状态
+      isLoggedIn = true;
+
+      // 更新 UI
+      document.getElementById('logged-in-user').textContent = username;
+      document.getElementById('login-section').style.display = 'none';
+      document.getElementById('logged-in-panel').style.display = 'block';
+      document.getElementById('logout-btn').style.display = 'inline-block';
+      
+      // ✅ 启用同步按钮
+      const syncUploadBtn = document.getElementById('sync-upload-btn');
+      const syncDownloadBtn = document.getElementById('sync-download-btn');
+      if (syncUploadBtn) {
+        syncUploadBtn.disabled = false;
+        syncUploadBtn.style.opacity = '1';
+      }
+      if (syncDownloadBtn) {
+        syncDownloadBtn.disabled = false;
+        syncDownloadBtn.style.opacity = '1';
+      }
+
+      alert('✅ 登录成功！');
+    } catch (error) {
+      console.error('❌ 登录失败:', error);
+      alert('❌ 登录失败：' + (error.message || '未知错误'));
+    }
+  }
+
+  // 退出登录（全局）
+  function logout() {
+    __clearAuthToken();
+    localStorage.removeItem('cloud_username');
+    isLoggedIn = false;
+    location.reload(); // 刷新页面回到登录状态
+  }
+  
+  // 保持旧的cloudLogout函数兼容性
+  function cloudLogout() {
+    logout();
+  }
+
+  // 从云端下载历史（全局）
+  async function downloadFromCloud() {
+    if (!isLoggedIn) {
+      alert('请先登录才能使用同步功能');
+      return;
+    }
+    
+    const token = _getAuthToken();
+    if (!token) {
+      alert('认证信息异常，请重新登录');
+      return;
+    }
+
+    try {
+      // 兼容：若页面有日期选择器，则带 date 参数；否则就取后端默认
+      const dateInput = document.getElementById('date-input') || document.getElementById('currentDate');
+      const date = dateInput?.value?.trim();
+      const url = date ? `${API_BASE_URL}/api/data?date=${encodeURIComponent(date)}` : `${API_BASE_URL}/api/data`;
+
+      const response = await fetch(url, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+
+      if (!response.ok) {
+        const t = await response.text().catch(() => '');
+        throw new Error(t || '获取数据失败');
+      }
+
+      const data = await response.json();
+
+      // ✅ 优先走你现有的恢复函数：保证“下载后真恢复界面”
+      // 支持两种常见返回：{date, data} 或 { [date]: data }
+      let dayData = null;
+      let dayKey = date || '';
+
+      if (data && data.data && (data.date || dayKey)) {
+        dayKey = data.date || dayKey;
+        dayData = data.data;
+      } else if (dayKey && data && typeof data === 'object' && data[dayKey]) {
+        dayData = data[dayKey];
+      } else if (data && typeof data === 'object') {
+        // 兜底：取对象里第一个日期键
+        const k = Object.keys(data).find(x => /^\d{4}-\d{2}-\d{2}$/.test(x));
+        if (k) { dayKey = k; dayData = data[k]; }
+      }
+
+      if (dayData && typeof window.restoreUIFromData === 'function') {
+        window.restoreUIFromData(dayData);
+        try { localStorage.setItem(`tpi_data_${dayKey}`, JSON.stringify(dayData)); } catch(e) {}
+        alert('✅ 数据已加载并恢复：' + (dayKey || '（未指定日期）'));
+      } else {
+        // 最低兜底：至少告诉你拿到了什么
+        alert('✅ 数据已加载！');
+        console.log('[CloudDownload] data=', data);
+      }
+    } catch (error) {
+      console.error('❌ 下载失败:', error);
+      alert('❌ 下载失败：' + (error.message || '未知错误'));
+    }
+  }
+
+  // 立即同步到云端（全局）
+  async function syncToCloud() {
+    // ✅ 先检查内存状态（更快）
+    if (!isLoggedIn) {
+      alert('请先登录才能使用同步功能');
+      return;
+    }
+    
+    const token = _getAuthToken();
+    if (!token) {
+      alert('认证信息异常，请重新登录');
+      return;
+    }
+
+    // ✅ 优先收集你网页的真实当日数据（否则会导致“上传/下载不一致”）
+    let payload = null;
+    try {
+      if (typeof window.collectDailyData === 'function') {
+        const dailyObj = window.collectDailyData();
+        const dateKey = Object.keys(dailyObj || {})[0];
+        if (dateKey) payload = { date: dateKey, data: dailyObj[dateKey] };
+      }
+    } catch (e) {
+      console.warn('[CloudUpload] collectDailyData failed:', e);
+    }
+
+    // 兜底：避免后端收到空 payload
+    if (!payload) {
+      payload = {
+        date: new Date().toISOString().slice(0, 10),
+        data: { note: 'no collectDailyData() found', updateTime: new Date().toISOString() }
+      };
+    }
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/save`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        const t = await response.text().catch(() => '');
+        throw new Error(t || '保存失败');
+      }
+
+      alert('✅ 数据已同步到云端！');
+    } catch (error) {
+      console.error('❌ 同步失败:', error);
+      alert('❌ 同步失败：' + (error.message || '未知错误'));
+    }
+  }
+
+  // ===== 兼容旧按钮命名（不改 HTML onclick 也能用）=====
+  window.cloudLogin = cloudLogin;
+  window.cloudLogout = cloudLogout;
+  window.downloadFromCloud = downloadFromCloud;
+  window.syncToCloud = syncToCloud;
+
+  window.manualSync = window.manualSync || syncToCloud;
+  window.uploadToCloud = window.uploadToCloud || syncToCloud;
+
+  window.downloadHistoryFromCloud = window.downloadHistoryFromCloud || downloadFromCloud;
+  window.cloudDownloadHistory = window.cloudDownloadHistory || downloadFromCloud;
+  window.cloudUploadNow = window.cloudUploadNow || syncToCloud;
+
+  // 页面加载后检查登录态
+  (function initLoginState(){
+    const token = _getAuthToken();
+    const u = localStorage.getItem('cloud_username') || '';
+    isLoggedIn = !!token;
+    __updateLoginUI(!!token, u);
+    
+    // ✅ 如果已登录，启用同步按钮
+    if (isLoggedIn) {
+      // 使用延迟确保DOM已加载
+      setTimeout(() => {
+        const syncUploadBtn = document.getElementById('sync-upload-btn');
+        const syncDownloadBtn = document.getElementById('sync-download-btn');
+        if (syncUploadBtn) {
+          syncUploadBtn.disabled = false;
+          syncUploadBtn.style.opacity = '1';
+        }
+        if (syncDownloadBtn) {
+          syncDownloadBtn.disabled = false;
+          syncDownloadBtn.style.opacity = '1';
+        }
+      }, 100);
+    }
+  })();
+
+  console.log('✅ Cloud Sync(Local Backend) patch loaded:', API_BASE_URL);
 </script>
 
 <script>
@@ -511,7 +787,13 @@ window.collectDailyData = function() {
   // ✅ [草稿54 Patch] 打包未来事件雷达（全局数据，不按日分库）
   try {
     const _radarRaw = localStorage.getItem('tpi_radar_events_v3');
-    if (_radarRaw) data["futureRadarV3"] = JSON.parse(_radarRaw);
+    if (_radarRaw) {
+      data["futureRadarV3"] = JSON.parse(_radarRaw);
+    }
+    // ✅ 【新增】同时收集新格式的未来事件数据
+    if (window.TPIEnhanced && window.TPIEnhanced.futureEvents) {
+      data["futureEvents"] = window.TPIEnhanced.futureEvents;
+    }
   } catch (_e) { console.warn('[collectDailyData] radar pack failed:', _e); }
 
   // ✅ [草稿75 Patch] 打包未来事件雷达设置（PushPlus配置等）
@@ -519,6 +801,46 @@ window.collectDailyData = function() {
     const _radarPushRaw = localStorage.getItem('tpi_radar_push_config');
     if (_radarPushRaw) data["futureRadarPushConfig"] = JSON.parse(_radarPushRaw);
   } catch (_e) { console.warn('[collectDailyData] radar push config pack failed:', _e); }
+
+  // ✅ 【新增】打包当天实际分数
+  try {
+    const scoreInput = document.getElementById('today-score-input');
+    if (scoreInput && scoreInput.value !== '') {
+      data["todayScore"] = parseFloat(scoreInput.value) || null;
+    } else if (window.TPIEnhanced && window.TPIEnhanced.todayScore !== null) {
+      data["todayScore"] = window.TPIEnhanced.todayScore;
+    }
+  } catch (_e) { console.warn('[collectDailyData] today score pack failed:', _e); }
+
+  // ✅ 【新增】额外确保关键分数和评级被收集（双重保险）
+  try {
+    // 收集主要分数（即使已在 FIELDS.scoreFields 中，也再次确保）
+    const criticalScores = ['tpi-total', 'tpi-rating', 'ma7-score', 'streak-days', 'losing-streak-days'];
+    criticalScores.forEach(key => {
+      const el = document.getElementById(key);
+      if (el) {
+        if (el.tagName === 'SELECT') {
+          data[key] = el.value;
+        } else {
+          const val = String(el.value || '').trim();
+          data[key] = (val === "") ? "" : (isNaN(parseFloat(val)) ? val : parseFloat(val));
+        }
+      }
+    });
+    
+    // 收集顶部分数板显示值（作为视图状态的补充）
+    const topScoreEl = document.getElementById('ts-total');
+    if (topScoreEl) {
+      data["_topScoreboard"] = topScoreEl.textContent || topScoreEl.innerText || "0.0";
+    }
+    
+    console.log('[collectDailyData] 关键分数已收集:', {
+      'tpi-total': data['tpi-total'],
+      'tpi-rating': data['tpi-rating'],
+      'ma7-score': data['ma7-score'],
+      '_topScoreboard': data['_topScoreboard']
+    });
+  } catch (_e) { console.warn('[collectDailyData] critical scores pack failed:', _e); }
 
   // ✅ [草稿54 Patch] 打包杂事记录（按当前选定日期）
   try {
@@ -611,6 +933,15 @@ window.restoreUIFromData = function(data) {
       }
     } catch (_e) { console.warn('[restoreUIFromData] radar restore failed:', _e); }
   }
+  
+  // ✅ 【新增】恢复新格式的未来事件数据
+  if (data["futureEvents"] && Array.isArray(data["futureEvents"])) {
+    try {
+      if (!window.TPIEnhanced) window.TPIEnhanced = { futureEvents: [], todayScore: null, isDirty: false };
+      window.TPIEnhanced.futureEvents = data["futureEvents"];
+      console.log('[restoreUIFromData] 已恢复未来事件:', data["futureEvents"].length, '条');
+    } catch (_e) { console.warn('[restoreUIFromData] future events restore failed:', _e); }
+  }
 
   // ✅ [草稿75 Patch] 恢复未来事件雷达设置（PushPlus配置等）
   if (data["futureRadarPushConfig"] && typeof data["futureRadarPushConfig"] === 'object') {
@@ -620,6 +951,19 @@ window.restoreUIFromData = function(data) {
         window.FutureRadar.pushConfig = data["futureRadarPushConfig"];
       }
     } catch (_e) { console.warn('[restoreUIFromData] radar push config restore failed:', _e); }
+  }
+
+  // ✅ 【新增】恢复当天实际分数
+  if (data["todayScore"] !== undefined && data["todayScore"] !== null) {
+    try {
+      const scoreInput = document.getElementById('today-score-input');
+      if (scoreInput) {
+        scoreInput.value = data["todayScore"];
+      }
+      if (!window.TPIEnhanced) window.TPIEnhanced = { futureEvents: [], todayScore: null, isDirty: false };
+      window.TPIEnhanced.todayScore = data["todayScore"];
+      console.log('[restoreUIFromData] 已恢复当天分数:', data["todayScore"]);
+    } catch (_e) { console.warn('[restoreUIFromData] today score restore failed:', _e); }
   }
 
   // ✅ [草稿54 Patch] 恢复杂事记录（写回对应日期的 localStorage + 刷新 UI）
@@ -685,11 +1029,99 @@ window.restoreUIFromData = function(data) {
     } catch (_e) { console.warn('[restoreUIFromData] checkinData restore failed:', _e); }
   }
 
+  // ✅ 【新增】强制恢复所有分数显示（确保顶部分数板、TPI仪表盘、各模块分数都正确显示）
+  try {
+    // 1. 恢复主要分数字段（TPI总分、评级等）
+    const scoreFields = [
+      'tpi-total', 'ma7-score', 'ami-score', 'fli-score', 'sys-score', 'bonus-score',
+      'bcm-morning-score', 'bcm-evening-score', 'bcm-sleep-score',
+      'bcm-digital-score', 'bcm-afternoon-score',
+      'hsm-core-score', 'hsm-morning-score', 'hsm-afternoon-score',
+      'hsm-water-morning-score', 'hsm-water-afternoon-score', 'hsm-water-evening-score',
+      'fli-core-score', 'fli-fragment-score'
+    ];
+    
+    scoreFields.forEach(fieldId => {
+      if (data[fieldId] !== undefined) {
+        const el = document.getElementById(fieldId);
+        if (el) {
+          el.value = (data[fieldId] === "" || data[fieldId] === null) ? "" : String(data[fieldId]);
+          console.log(`[恢复分数] ${fieldId} = ${el.value}`);
+        }
+      }
+    });
+    
+    // 2. 恢复 TPI 评级
+    if (data['tpi-rating'] !== undefined) {
+      const ratingEl = document.getElementById('tpi-rating');
+      if (ratingEl) {
+        ratingEl.value = data['tpi-rating'];
+        console.log('[恢复评级] tpi-rating =', ratingEl.value);
+      }
+    }
+    
+    // 3. 恢复连胜/连败天数
+    const streakFields = ['streak-days', 'losing-streak-days'];
+    streakFields.forEach(fieldId => {
+      if (data[fieldId] !== undefined) {
+        const el = document.getElementById(fieldId);
+        if (el) {
+          el.value = data[fieldId] === "" ? "" : String(data[fieldId]);
+          console.log(`[恢复连胜] ${fieldId} = ${el.value}`);
+        }
+      }
+    });
+    
+    // 4. 恢复顶部分数板显示
+    if (data['_topScoreboard'] !== undefined) {
+      const topScoreEl = document.getElementById('ts-total');
+      if (topScoreEl) {
+        topScoreEl.textContent = data['_topScoreboard'];
+        console.log('[恢复顶部分数板] ts-total =', topScoreEl.textContent);
+      }
+    } else if (data['tpi-total'] !== undefined && data['tpi-total'] !== "") {
+      // 兜底：如果没有 _topScoreboard 但有 tpi-total，用它来更新
+      const topScoreEl = document.getElementById('ts-total');
+      if (topScoreEl) {
+        topScoreEl.textContent = String(data['tpi-total']);
+        console.log('[恢复顶部分数板（兜底）] ts-total =', topScoreEl.textContent);
+      }
+    }
+    
+  } catch (e) {
+    console.warn('[restoreUIFromData] 分数恢复失败:', e);
+  }
+
   // 最后：触发重新计算，保证分数/评级/徽章状态立刻正确
   __tpi_triggerRecalc();
+  
+  // ✅ 【新增】延迟更新顶部分数板（确保所有DOM更新完成后再刷新显示）
+  setTimeout(() => {
+    try {
+      // 强制更新顶部分数板
+      if (window.TopScoreboard && typeof window.TopScoreboard.update === 'function') {
+        window.TopScoreboard.update();
+        console.log('[恢复完成] 已刷新顶部分数板');
+      }
+      
+      // 强制触发 TPI.checkOverload 确保评级正确
+      if (window.TPI && typeof window.TPI.checkOverload === 'function') {
+        window.TPI.checkOverload();
+        console.log('[恢复完成] 已更新 TPI 评级');
+      }
+      
+      // 再次触发计算确保所有依赖分数的显示都更新
+      if (window.TPI && typeof window.TPI.calculateTPI === 'function') {
+        window.TPI.calculateTPI();
+        console.log('[恢复完成] 已重新计算所有分数');
+      }
+    } catch (e) {
+      console.warn('[restoreUIFromData] 延迟更新失败:', e);
+    }
+  }, 300);
 
 
-  console.log('✅ UI 已从数据恢复(v8完整快照):', data);
+  console.log('✅ UI 已从数据恢复(v9完整快照+分数增强):', data);
 };
 
 console.log('✅ 独裁补丁 v5 已在 <head> 强制加载 (collectDailyData & restoreUIFromData)');
@@ -4692,12 +5124,25 @@ window.exportAsCSV = function() {
         </p>
        </div>
        
-       <!-- 🔑 新增：登录区域（初始显示） -->
-       <div id="cloud-login" style="margin:12px 0;">
-        <input type="text" id="cloud-username" placeholder="用户名" style="width:100%; padding:6px; margin:4px 0; border:1px solid #ccc; border-radius:4px;">
-        <input type="password" id="cloud-password" placeholder="密码" style="width:100%; padding:6px; margin:4px 0; border:1px solid #ccc; border-radius:4px;">
-        <button onclick="cloudLogin()" style="width:100%; padding:6px; background:#4CAF50; color:white; border:none; border-radius:4px; margin-top:6px;">登录以启用同步</button>
-        <p id="cloud-login-error" style="color:#f44336; font-size:12px; min-height:1.2em; margin-top:4px;"></p>
+       <!-- 🔑 登录区域（初始显示） -->
+       <div id="login-section" style="margin:12px 0;">
+        <h3>☁️ 云端同步 Cloud Sync</h3>
+        <p>功能说明:将 TPI 数据同步到本地后端服务。</p>
+        
+        <input type="text" id="username" placeholder="用户名 (默认: xiaoyi)" style="width:100%; padding:8px; margin:6px 0; border:1px solid #ccc; border-radius:4px;">
+        <input type="password" id="password" placeholder="密码 (默认: 123456)" style="width:100%; padding:8px; margin:6px 0; border:1px solid #ccc; border-radius:4px;">
+        
+        <button onclick="cloudLogin()" style="width:100%; padding:8px; background:#4CAF50; color:white; border:none; border-radius:4px; margin-top:6px; cursor:pointer;">登录以启用同步</button>
+       </div>
+       
+       <!-- 已登录状态显示 -->
+       <div id="logged-in-panel" style="display:none; margin:12px 0; padding:10px; background:#e8f5e9; border-radius:6px; border-left:4px solid #4CAF50;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <span style="color:#2e7d32; font-weight:600;">
+            ✅ 已登录: <span id="logged-in-user"></span>
+          </span>
+          <button id="logout-btn" onclick="logout()" style="display:none; padding:4px 12px; background:#f44336; color:white; border:none; border-radius:4px; font-size:12px; cursor:pointer;">退出登录</button>
+        </div>
        </div>
        
        <!-- 📦 原有同步控件（始终显示） -->
@@ -4732,10 +5177,10 @@ window.exportAsCSV = function() {
        
        <!-- 操作按钮 - 已改用专用后端 API -->
        <div class="sync-actions" style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px;">
-        <button id="sync-upload-btn" style="padding: 12px 20px; background: linear-gradient(135deg, #10b981, #059669); color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: all 0.3s;">
+        <button id="sync-upload-btn" disabled style="padding: 12px 20px; background: linear-gradient(135deg, #10b981, #059669); color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: all 0.3s; opacity: 0.5;">
          ⬆️ 立即同步到云端
         </button>
-        <button id="sync-download-btn" style="padding: 12px 20px; background: linear-gradient(135deg, #06b6d4, #0891b2); color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: all 0.3s;">
+        <button id="sync-download-btn" disabled style="padding: 12px 20px; background: linear-gradient(135deg, #06b6d4, #0891b2); color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: all 0.3s; opacity: 0.5;">
          ⬇️ 从云端下载历史
         </button>
        </div>
@@ -29824,145 +30269,320 @@ if (!document.getElementById('toast-animation-styles')) {
   document.head.appendChild(style);
 }
 
-// 同步状态更新函数
-function updateSyncStatusDisplay(message, isError = false) {
-  // 在控制台记录
-  console.log(isError ? '❌' : '✅', '[同步状态]', message);
+// 检查用户是否已登录
+function isUserLoggedIn() {
+  const token = localStorage.getItem('authToken') || localStorage.getItem('cloud_auth_token');
+  const username = localStorage.getItem('cloud_username');
+  return !!(token && username);
 }
 
-// 同步到云端函数
-window.syncToCloud = async function() {
+// 同步状态更新函数
+function updateSyncStatusDisplay(message, isError = false) {
+  const statusEl = document.getElementById('sync-status');
+  if (statusEl) {
+    statusEl.textContent = message;
+    statusEl.style.color = isError ? '#dc3545' : '#28a745';
+  }
+  console.log(`[同步状态] ${message}`);
+}
+
+// 上传到云端函数 - 完整改进版
+window.uploadToCloud = async function() {
+  // 检查登录状态
+  if (!isLoggedIn) {
+    if (window.tpiToast) {
+      window.tpiToast('⚠️ 请先登录才能使用同步功能', 'warning');
+    } else {
+      alert('⚠️ 请先登录才能使用同步功能');
+    }
+    return;
+  }
+
+  const uploadBtn = document.getElementById('sync-upload-btn');
+  
   try {
     updateSyncStatusDisplay('正在同步到云端...', false);
-    window.tpiToast('🔄 正在同步到云端...', 'info');
     
-    // 收集当前日期的完整数据
-    const fullData = window.collectDailyData();
-    const dateKey = Object.keys(fullData)[0];
-    const data = fullData[dateKey];
-    
-    if (!dateKey || !data) {
-      throw new Error('无法收集数据,请检查日期选择');
+    if (uploadBtn) {
+      uploadBtn.disabled = true;
+      uploadBtn.textContent = '上传中...';
     }
     
-    console.log('📤 准备上传数据:', { date: dateKey, dataSize: JSON.stringify(data).length });
+    // ✅ 改进：上传时不再依赖 localStorage.tpiData（它常为空导致“今日无数据”）
+// 统一以 collectDailyData() 为准，确保“杂事记录/未来事件雷达”等也能被打包上传
+let dailyObj = null;
+try {
+  if (typeof window.collectDailyData === 'function') {
+    dailyObj = window.collectDailyData(); // { [date]: data }
+  }
+} catch (e) {
+  console.warn('[上传] collectDailyData 失败，改用兜底 date/data:', e);
+}
+
+// ✅ 用本地日期（避免 UTC 跨日导致日期错位）
+let today = (function(){
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth()+1).padStart(2,'0');
+  const dd = String(d.getDate()).padStart(2,'0');
+  return `${yyyy}-${mm}-${dd}`;
+})();
+let dayData = null;
+
+try {
+  if (dailyObj && typeof dailyObj === 'object') {
+    const k = Object.keys(dailyObj)[0];
+    if (k) {
+      today = k;
+      dayData = dailyObj[k];
+    }
+  }
+} catch (e) {}
+
+if (!dayData || typeof dayData !== 'object') {
+  dayData = { _lastModified: new Date().toISOString(), note: 'no collectDailyData result' };
+}
+
+console.log('[上传] 开始上传:', { date: today, dataKeys: Object.keys(dayData || {}) });
+// 获取认证token
+    const authToken = localStorage.getItem('authToken') || localStorage.getItem('cloud_auth_token');
+    const headers = { 'Content-Type': 'application/json' };
+    if (authToken) {
+      headers['Authorization'] = `Bearer ${authToken}`;
+    }
     
-    // 发送到后端
-    const response = await fetch(`${BACKEND_URL}/api/tpi`, {
+    const response = await fetch(`${API_BASE_URL}/api/save`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        date: dateKey,
-        data: data
-      })
+      headers: headers,
+      body: JSON.stringify({ date: today, data: dayData })
     });
     
     if (!response.ok) {
-      const errorText = await response.text();
+      const errorText = await response.text().catch(() => '无法获取错误详情');
       throw new Error(`服务器响应错误 (${response.status}): ${errorText}`);
     }
     
-    const result = await response.json();
-    console.log('✅ 上传成功:', result);
-    
-    // 同时保存到本地作为备份
-    localStorage.setItem(`tpi_data_${dateKey}`, JSON.stringify(data));
-    
-    updateSyncStatusDisplay('同步成功', false);
-    window.tpiToast('✅ 数据已成功同步到云端', 'success');
+    // ✅ 本地也落一份：保证“上传后刷新/断网”仍可恢复当日全部输入与规则派生结果
+try {
+  // 合并到 tpiData（旧模块可能依赖它）
+  const _local = JSON.parse(localStorage.getItem('tpiData') || '{}');
+  _local[today] = dayData;
+  localStorage.setItem('tpiData', JSON.stringify(_local));
+  // 当日快照：跨模块读取更快
+  localStorage.setItem(`tpi_data_${today}`, JSON.stringify(dayData));
+} catch(e) { console.warn('[上传] 本地落盘失败:', e); }
+
+updateSyncStatusDisplay('同步成功', false);
+    if (window.tpiToast) {
+      window.tpiToast('✅ 同步成功！', 'success');
+    } else {
+      alert('✅ 同步成功！');
+    }
+    console.log('[上传] 上传成功:', today);
     
   } catch (error) {
-    console.error('❌ 同步失败:', error);
+    console.error('[上传] 上传失败:', error);
     updateSyncStatusDisplay(`同步失败: ${error.message}`, true);
-    window.tpiToast(`❌ 同步失败: ${error.message}`, 'error');
+    
+    // 提供更友好的错误提示
+    if (error.message.includes('Failed to fetch')) {
+      if (window.tpiToast) {
+        window.tpiToast('❌ 无法连接到服务器，请检查网络或稍后重试', 'error');
+      } else {
+        alert('❌ 无法连接到服务器，请检查网络或稍后重试');
+      }
+    } else {
+      if (window.tpiToast) {
+        window.tpiToast(`❌ 同步失败: ${error.message}`, 'error');
+      } else {
+        alert(`❌ 同步失败: ${error.message}`);
+      }
+    }
+  } finally {
+    // 恢复按钮状态
+    if (uploadBtn) {
+      uploadBtn.disabled = false;
+      uploadBtn.textContent = '⬆️ 立即同步到云端';
+    }
   }
 };
 
-// 从云端下载历史数据函数
+// 从云端下载历史数据函数 - 完整改进版
 window.downloadFromCloud = async function() {
+  // 检查登录状态
+  if (!isLoggedIn) {
+    if (window.tpiToast) {
+      window.tpiToast('⚠️ 请先登录才能使用同步功能', 'warning');
+    } else {
+      alert('⚠️ 请先登录才能使用同步功能');
+    }
+    return;
+  }
+
+  const downloadBtn = document.getElementById('sync-download-btn');
+  
   try {
     updateSyncStatusDisplay('正在从云端下载历史数据...', false);
-    window.tpiToast('📥 正在下载历史数据...', 'info');
     
-    console.log('📥 开始下载历史数据...');
+    if (downloadBtn) {
+      downloadBtn.disabled = true;
+      downloadBtn.textContent = '下载中...';
+    }
+    
+    if (window.tpiToast) {
+      window.tpiToast('📥 正在下载历史数据...', 'info');
+    }
+    
+    console.log('[下载] 开始下载历史数据...');
+    
+    // 获取认证token
+    const authToken = localStorage.getItem('authToken') || localStorage.getItem('cloud_auth_token');
+    const headers = { 'Content-Type': 'application/json' };
+    if (authToken) {
+      headers['Authorization'] = `Bearer ${authToken}`;
+    }
     
     // 从后端获取历史数据
-    const response = await fetch(`${BACKEND_URL}/api/tpi/history`, {
+    const response = await fetch(`${API_BASE_URL}/api/data`, {
       method: 'GET',
-      headers: {
-        'Content-Type': 'application/json'
-      }
+      headers: headers
     });
     
     if (!response.ok) {
-      const errorText = await response.text();
+      const errorText = await response.text().catch(() => '无法获取错误详情');
       throw new Error(`服务器响应错误 (${response.status}): ${errorText}`);
     }
     
     const historyData = await response.json();
-    console.log('✅ 下载成功,数据条数:', Object.keys(historyData).length);
-    
-    if (Object.keys(historyData).length === 0) {
-      window.tpiToast('ℹ️ 云端暂无历史数据', 'info');
+
+    // ✅ 兼容多种后端返回格式：
+    // 1) { "2026-02-06": {...}, ... }   (历史map)
+    // 2) { date: "2026-02-06", data: {...} } (单日)
+    // 3) [{date:"2026-02-06", data:{...}}, ...] (数组)
+    let historyDataMap = {};
+    try {
+      if (historyData && typeof historyData === 'object' && !Array.isArray(historyData)) {
+        if (historyData.date && historyData.data) {
+          historyDataMap[String(historyData.date)] = historyData.data;
+        } else {
+          historyDataMap = historyData;
+        }
+      } else if (Array.isArray(historyData)) {
+        historyData.forEach(it => {
+          if (!it) return;
+          const k = it.date || it.day || it.key;
+          if (!k) return;
+          historyDataMap[String(k)] = (it.data !== undefined) ? it.data : it;
+        });
+      }
+    } catch (e) {
+      historyDataMap = {};
+    }
+
+    console.log('[下载] 下载成功,数据条数:', Object.keys(historyDataMap).length);
+
+    if (Object.keys(historyDataMap).length === 0) {
+      if (window.tpiToast) {
+        window.tpiToast('ℹ️ 云端暂无历史数据', 'info');
+      } else {
+        alert('ℹ️ 云端暂无历史数据');
+      }
       updateSyncStatusDisplay('云端无数据', false);
       return;
     }
     
-    // 合并到本地存储(不覆盖本地未同步的新数据)
+    // 合并到本地存储
+    const localData = JSON.parse(localStorage.getItem('tpiData') || '{}');
     let mergedCount = 0;
-    Object.keys(historyData).forEach(dateKey => {
-      const cloudData = historyData[dateKey];
-      const localKey = `tpi_data_${dateKey}`;
+    
+    Object.keys(historyDataMap).forEach(dateKey => {
+      const cloudData = historyDataMap[dateKey];
       
       // 检查本地是否已有该日期的数据
-      const localData = localStorage.getItem(localKey);
-      
-      if (!localData) {
+      if (!localData[dateKey]) {
         // 本地无数据,直接写入
-        localStorage.setItem(localKey, JSON.stringify(cloudData));
+        localData[dateKey] = cloudData;
         mergedCount++;
-        console.log(`📝 写入新数据: ${dateKey}`);
+        console.log(`[下载] 写入新数据: ${dateKey}`);
       } else {
         // 本地有数据,比较时间戳决定是否覆盖
-        try {
-          const localObj = JSON.parse(localData);
-          const cloudTimestamp = new Date(cloudData._timestamp || 0).getTime();
-          const localTimestamp = new Date(localObj._timestamp || 0).getTime();
-          
-          if (cloudTimestamp > localTimestamp) {
-            localStorage.setItem(localKey, JSON.stringify(cloudData));
-            mergedCount++;
-            console.log(`🔄 更新数据(云端较新): ${dateKey}`);
-          } else {
-            console.log(`⏭️  跳过(本地较新): ${dateKey}`);
-          }
-        } catch (e) {
-          console.warn(`⚠️  解析本地数据失败,跳过: ${dateKey}`, e);
+        const cloudTimestamp = new Date(cloudData._timestamp || 0).getTime();
+        const localTimestamp = new Date(localData[dateKey]._timestamp || 0).getTime();
+        
+        if (cloudTimestamp > localTimestamp) {
+          localData[dateKey] = cloudData;
+          mergedCount++;
+          console.log(`[下载] 更新数据(云端较新): ${dateKey}`);
+        } else {
+          console.log(`[下载] 跳过(本地较新): ${dateKey}`);
         }
       }
     });
     
-    updateSyncStatusDisplay('历史数据已恢复', false);
-    window.tpiToast(`✅ 成功恢复 ${mergedCount} 条历史数据,页面即将刷新`, 'success');
+    // 保存合并后的数据
+    localStorage.setItem('tpiData', JSON.stringify(localData));
     
-    // 延迟刷新页面以显示最新数据
-    setTimeout(() => {
-      location.reload();
-    }, 2000);
-    
-  } catch (error) {
-    console.error('❌ 下载失败:', error);
+    // ✅ 下载完成后：优先立刻恢复到当前选中日期（不必强制刷新）
+updateSyncStatusDisplay('历史数据已恢复', false);
+
+let _selectedDate = '';
+try {
+  const dateInput = document.getElementById('date-input') || document.getElementById('currentDate');
+  _selectedDate = (dateInput && dateInput.value) ? String(dateInput.value).trim() : '';
+} catch(e) {}
+
+let _restored = false;
+try {
+  const targetDate = (_selectedDate && localData[_selectedDate]) ? _selectedDate : null;
+  if (targetDate && typeof window.restoreUIFromData === 'function') {
+    window.restoreUIFromData(localData[targetDate]);
+    try { localStorage.setItem(`tpi_data_${targetDate}`, JSON.stringify(localData[targetDate])); } catch(e){}
+    _restored = true;
+  }
+} catch(e) { console.warn('[下载] 立即恢复UI失败:', e); }
+
+if (window.tpiToast) {
+  window.tpiToast(_restored ? `✅ 已恢复并加载 ${mergedCount} 条历史数据` : `✅ 已恢复 ${mergedCount} 条历史数据（未自动切换界面）`, 'success');
+} else {
+  alert(_restored ? `✅ 已恢复并加载 ${mergedCount} 条历史数据` : `✅ 已恢复 ${mergedCount} 条历史数据（未自动切换界面）`);
+}
+
+// 若你仍希望下载后强制刷新，可把下面改为 true
+const FORCE_RELOAD_AFTER_DOWNLOAD = false;
+if (FORCE_RELOAD_AFTER_DOWNLOAD) {
+  setTimeout(() => location.reload(), 800);
+}
+} catch (error) {
+    console.error('[下载] 下载失败:', error);
     updateSyncStatusDisplay(`下载失败: ${error.message}`, true);
-    window.tpiToast(`❌ 下载失败: ${error.message}`, 'error');
+    
+    // 提供更友好的错误提示
+    if (error.message.includes('Failed to fetch')) {
+      if (window.tpiToast) {
+        window.tpiToast('❌ 无法连接到服务器，请检查网络或稍后重试', 'error');
+      } else {
+        alert('❌ 无法连接到服务器，请检查网络或稍后重试');
+      }
+    } else {
+      if (window.tpiToast) {
+        window.tpiToast(`❌ 下载失败: ${error.message}`, 'error');
+      } else {
+        alert(`❌ 下载失败: ${error.message}`);
+      }
+    }
+  } finally {
+    // 恢复按钮状态
+    if (downloadBtn) {
+      downloadBtn.disabled = false;
+      downloadBtn.textContent = '⬇️ 从云端下载历史';
+    }
   }
 };
 
-// 页面加载时显示就绪状态
+// 页面加载时初始化
 document.addEventListener('DOMContentLoaded', () => {
   updateSyncStatusDisplay('云端同步就绪', false);
-  console.log('✅ 后端集成模块已加载,后端地址:', BACKEND_URL);
+  console.log('✅ 云端同步模块已加载,后端地址:', API_BASE_URL);
 });
 
 console.log('✅ 后端集成核心功能已加载');
@@ -29970,47 +30590,17 @@ console.log('✅ 后端集成核心功能已加载');
 
 <script>
 /* =========================================================
-   同步按钮事件监听器 - 生产级优化
-   目标：为两个同步按钮绑定真实的API调用能力
+   同步按钮事件监听器 - 完全改进版 v2
+   完整的登录、退出、上传、下载四个按钮的事件绑定
 ========================================================= */
 
-// 1. 绑定「立即同步到云端」按钮
 document.addEventListener('DOMContentLoaded', () => {
+  // 1. 绑定「立即同步到云端」按钮
   const uploadBtn = document.getElementById('sync-upload-btn');
   if (uploadBtn) {
-    uploadBtn.addEventListener('click', async () => {
-      const today = new Date().toISOString().split('T')[0];
-      const tpiData = JSON.parse(localStorage.getItem('tpiData') || '{}');
-      
-      // 检查今日是否有数据
-      if (!tpiData[today]) {
-        alert('⚠️ 今日无数据，无法同步');
-        console.warn('[同步] 今日无数据:', today);
-        return;
-      }
-      
-      try {
-        console.log('[同步] 开始上传:', { date: today, dataKeys: Object.keys(tpiData[today]) });
-        
-        const res = await fetch(`${BACKEND_URL}/api/tpi`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ date: today, data: tpiData[today] })
-        });
-        
-        if (res.ok) {
-          alert('✅ 同步成功！');
-          console.log('[同步] 上传成功:', today);
-        } else {
-          const errorText = await res.text().catch(() => '无法获取错误详情');
-          alert(`❌ 同步失败：HTTP ${res.status}`);
-          console.error('[同步] 上传失败:', res.status, errorText);
-        }
-      } catch (err) {
-        alert('❌ 网络错误，请检查后端服务是否在线');
-        console.error('[同步] 网络错误:', err);
-      }
-    });
+    // 移除旧的onclick属性避免重复绑定
+    uploadBtn.removeAttribute('onclick');
+    uploadBtn.addEventListener('click', window.uploadToCloud);
     console.log('✅ [事件] sync-upload-btn 已绑定');
   } else {
     console.warn('⚠️ [事件] 未找到 sync-upload-btn');
@@ -30019,76 +30609,38 @@ document.addEventListener('DOMContentLoaded', () => {
   // 2. 绑定「从云端下载历史」按钮
   const downloadBtn = document.getElementById('sync-download-btn');
   if (downloadBtn) {
-    downloadBtn.addEventListener('click', async () => {
-      try {
-        console.log('[下载] 开始获取云端历史数据...');
-        
-        const res = await fetch(`${BACKEND_URL}/api/tpi/history`);
-        
-        if (!res.ok) {
-          throw new Error(`HTTP ${res.status}`);
-        }
-        
-        const remoteData = await res.json();
-        console.log('[下载] 云端数据条数:', Object.keys(remoteData).length);
-        
-        if (Object.keys(remoteData).length === 0) {
-          alert('ℹ️ 云端暂无历史数据');
-          return;
-        }
-        
-        const localData = JSON.parse(localStorage.getItem('tpiData') || '{}');
-        
-        // 合并策略：保留本地未同步的新数据，用云端覆盖旧数据
-        const merged = { ...remoteData, ...localData };
-        
-        localStorage.setItem('tpiData', JSON.stringify(merged));
-        console.log('[下载] 数据已合并到本地，总计:', Object.keys(merged).length, '条');
-        
-        alert('✅ 历史数据已恢复！页面即将刷新');
-        
-        // 延迟刷新，让用户看到提示
-        setTimeout(() => {
-          location.reload();
-        }, 1500);
-        
-      } catch (err) {
-        alert('❌ 下载失败，请检查网络或后端状态');
-        console.error('[下载] 错误:', err);
-      }
-    });
+    // 移除旧的onclick属性避免重复绑定
+    downloadBtn.removeAttribute('onclick');
+    downloadBtn.addEventListener('click', window.downloadFromCloud);
     console.log('✅ [事件] sync-download-btn 已绑定');
   } else {
     console.warn('⚠️ [事件] 未找到 sync-download-btn');
   }
+  
+  // 3. 绑定「登录」按钮
+  const loginBtn = document.getElementById('cloud-login-btn');
+  if (loginBtn) {
+    // 移除旧的onclick属性避免重复绑定
+    loginBtn.removeAttribute('onclick');
+    loginBtn.addEventListener('click', cloudLogin);
+    console.log('✅ [事件] cloud-login-btn 已绑定');
+  } else {
+    console.warn('⚠️ [事件] 未找到 cloud-login-btn');
+  }
+  
+  // 4. 绑定「退出登录」按钮
+  const logoutBtn = document.getElementById('cloud-logout-btn');
+  if (logoutBtn) {
+    // 移除旧的onclick属性避免重复绑定
+    logoutBtn.removeAttribute('onclick');
+    logoutBtn.addEventListener('click', cloudLogout);
+    console.log('✅ [事件] cloud-logout-btn 已绑定');
+  } else {
+    console.warn('⚠️ [事件] 未找到 cloud-logout-btn');
+  }
 });
 
 console.log('✅ 同步按钮事件监听器已加载');
-
-// === 云端同步逻辑 ===
-document.getElementById('sync-upload-btn')?.addEventListener('click', async () => {
-  const today = new Date().toISOString().split('T')[0];
-  const tpiData = JSON.parse(localStorage.getItem('tpiData') || '{}');
-  if (!tpiData[today]) return alert('⚠️ 今日无数据');
-  try {
-    const res = await fetch(`${BACKEND_URL}/api/tpi`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date: today, data: tpiData[today] })
-    });
-    alert(res.ok ? '✅ 同步成功！' : '❌ 同步失败');
-  } catch (e) { alert('❌ 网络错误'); }
-});
-
-document.getElementById('sync-download-btn')?.addEventListener('click', async () => {
-  try {
-    const res = await fetch(`${BACKEND_URL}/api/tpi/history`);
-    const remote = await res.json();
-    const local = JSON.parse(localStorage.getItem('tpiData') || '{}');
-    localStorage.setItem('tpiData', JSON.stringify({ ...local, ...remote }));
-    location.reload();
-  } catch (e) { alert('❌ 下载失败'); }
-});
 
 </script>
 </body>
